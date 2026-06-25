@@ -1,0 +1,50 @@
+#include <Wire.h>
+#include <MPU6050.h>
+#include <MadgwickAHRS.h>
+
+MPU6050 mpu;
+Madgwick filter;
+
+void setup() {
+    Serial.begin(115200);
+
+    Wire.begin(21,22);
+    mpu.initialize();
+
+    filter.begin(100); // Hz
+}
+
+void loop() {
+    int16_t axRaw, ayRaw, azRaw;
+    int16_t gxRaw, gyRaw, gzRaw;
+
+    mpu.getMotion6(
+        &axRaw, &ayRaw, &azRaw,
+        &gxRaw, &gyRaw, &gzRaw
+    );
+
+    // Convert raw values
+    float ax = axRaw / 16384.0;
+    float ay = ayRaw / 16384.0;
+    float az = azRaw / 16384.0;
+
+    float gx = gxRaw / 131.0;
+    float gy = gyRaw / 131.0;
+    float gz = gzRaw / 131.0;
+
+    filter.updateIMU(
+        gx, gy, gz,
+        ax, ay, az
+    );
+
+    Serial.print("Roll: ");
+    Serial.print(filter.getRoll());
+
+    Serial.print(" Pitch: ");
+    Serial.print(filter.getPitch());
+
+    Serial.print(" Yaw: ");
+    Serial.println(filter.getYaw());
+
+    delay(10);
+}
