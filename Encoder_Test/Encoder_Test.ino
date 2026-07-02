@@ -2,8 +2,8 @@
 
 ESP32Encoder encoder;
 
-#define Apin 22
-#define Bpin 21
+#define Apin 32
+#define Bpin 33
 
 #define Steps_Per_Revolution 8192
 #define Wheel_Diameter 0.075

@@ -59,7 +59,7 @@ x_acceleration = (float)x_acceleration_lsb / 4096 - 0.035;
 y_acceleration = (float)y_acceleration_lsb / 4096 + 0.000;
 z_acceleration = (float)z_acceleration_lsb / 4096 + 0.035;
 
-pitch_angle = -atan(x_acceleration / sqrt(z_acceleration * z_acceleration + y_acceleration * y_acceleration)) * 1 / (3.142 / 180);}
+pitch_angle = atan2(y_acceleration, -x_acceleration) * 180.0 / PI;}
 
 void Kalman(float kalman_state, float kalman_uncertainty, float kalman_input, float kalman_measurement) {
 
