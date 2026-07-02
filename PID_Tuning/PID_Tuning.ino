@@ -2,14 +2,13 @@
 #include <ESP32Encoder.h> 
 #include <Bluepad32.h>
 
-
 // General -- 
 
 #define Battery_Pin 36
 #define Buzzer_Pin 12
 
-#define F 200 // System frequency 
-#define T 0.005 // System period 
+#define F 200     // Frekvencija sistema (200Hz)
+#define T 0.005   // Period sistema (5ms)
 
 unsigned long last_time = 0; 
 float battery_voltage = 12;
@@ -47,8 +46,8 @@ ESP32Encoder right_encoder;
 #define Wheel_Diameter 0.075 
 #define mI_Treshold 0.75
 #define mI_Limit 500
-#define Left_FFK 212.31
-#define Right_FFK 219.30
+#define Left_FFK 219.30  
+#define Right_FFK 212.31 
 
 const float Meters_Per_Step = PI * Wheel_Diameter / Steps_Per_Revolution; 
 
@@ -61,43 +60,76 @@ long last_left_steps = 0;
 long last_right_steps = 0;
 
 float PID_desired_velocity;
-float left_desired_velocity, left_velocity, left_last_mI, left_last_velocity_error, left_mPID_return; 
-float right_desired_velocity, right_velocity, right_last_mI, right_last_velocity_error, right_mPID_return; 
+float left_desired_velocity, left_velocity, left_last_mI, left_last_velocity_error; 
+float right_desired_velocity, right_velocity, right_last_mI, right_last_velocity_error; 
 
-float mKp = 25.5; 
-float mKi = 20; 
-float mKd = 14; 
+// Donji PID (točkovi) - ostaje fiksiran jer Feedforward radi glavni posao
+float mKp = 0.5; 
+float mKi = 0.1; 
+float mKd = 0.01; 
 float mPID_return[3]; 
 float mAlpha = 0.2;
 
 
-// Angle Control -- 
+// Angle Control (GLAVNI URADI SAM INTEGRISANI IMU) -- 
 
 #define I2C_SDA_Pin 21
 #define I2C_SCL_Pin 22
+#define Fall_Treshold 45
 
-#define Gyro_Bias 0.03
-#define Accelerometer_Std 30.9
-#define Gyro_Drift 0.3453865
+// Promenljive iz tvog testiranog koda
+float pitch_rate; 
+float x_acceleration, y_acceleration, z_acceleration;
+float pitch_angle;
+float pitch_kalman_angle = 0;
+float pitch_kalman_angle_uncertainty = 4; // 2 * 2
+float kalman_output[] = {0, 0};
+
+// Mapiranje na globalnu varijablu ugla koju koristi tvoj kaskadni PID
+float angle; 
+float base_angle = 3.0; // FIKS: Početna vrednost mehaničkog balansa koju menjaš preko terminala
+float desired_angle, last_I, last_angle_error; 
 #define I_Treshold 3
 #define I_Limit 10
 
-#define Fall_Treshold 45
-
-float angle_rate, acc_angle, angle, desired_angle, last_I, last_angle_error; 
-float x_acceleration, y_acceleration, z_acceleration; 
-
-float angle_uncertainty = 4; // 2 * 2 
-float kalman_return[2]; 
-
-float Kp = 0;
-float Ki = 0;
-float Kd = 0;
+// GLAVNI KOEFICIJENTI ZA BALANS - Tjunuješ ih uživo preko Serial Monitora
+float Kp = 0.3;
+float Ki = 1.0;
+float Kd = 0.0002;
 float PID_return[3]; 
 
 
-void Encoder_Setup(){ 
+// Prijem komandi preko serijale uživo u toku rada (npr. p45.5, d12, c-1.5)
+void Proveri_Serial_Komande() {
+  if (Serial.available() > 0) {
+    String input = Serial.readStringUntil('\n');
+    input.trim(); 
+    
+    if (input.length() > 1) {
+      char komanda = input.charAt(0);
+      float vrednost = input.substring(1).toFloat();
+        
+      if (komanda == 'p' || komanda == 'P') {
+        Kp = vrednost;
+        Serial.print(">>> Glavni Kp (Balans) postavljen na: "); Serial.println(Kp, 5);
+      } 
+      else if (komanda == 'i' || komanda == 'I') {
+        Ki = vrednost;
+        Serial.print(">>> Glavni Ki (Balans) postavljen na: "); Serial.println(Ki, 5);
+      }
+      else if (komanda == 'd' || komanda == 'D') {
+        Kd = vrednost;
+        Serial.print(">>> Glavni Kd (Balans) postavljen na: "); Serial.println(Kd, 5);
+      }
+      else if (komanda == 'c' || komanda == 'C') { // FIKS: Nova komanda za ciljani ugao (Centar mase)
+        base_angle = vrednost;
+        Serial.print(">>> Bazni ciljani ugao postavljen na: "); Serial.println(base_angle, 2);
+      }
+    }
+  }
+}
 
+void Encoder_Setup(){ 
   left_encoder.attachFullQuad(LApin, LBpin); 
   left_encoder.clearCount(); 
   right_encoder.attachFullQuad(RApin, RBpin); 
@@ -105,7 +137,6 @@ void Encoder_Setup(){
 } 
 
 void Measure_Wheel_Velocity(){
-
   long left_steps = left_encoder.getCount(); 
   long right_steps = right_encoder.getCount();
 
@@ -116,30 +147,28 @@ void Measure_Wheel_Velocity(){
   last_right_steps = right_steps; 
 
   float raw_left_velocity = delta_left * Meters_Per_Step * F;
-  float raw_right_velocity = delta_right * Meters_Per_Step * F;
+  float raw_right_velocity = delta_right * Meters_Per_Step * F; 
 
   left_velocity = (raw_left_velocity * mAlpha) + (left_velocity * (1 - mAlpha));
   right_velocity = (raw_right_velocity * mAlpha) + (right_velocity * (1 - mAlpha));
 } 
 
 void Wheel_Velocity(){
-
   left_desired_velocity  = PID_desired_velocity + rotational_speed ;
   right_desired_velocity = PID_desired_velocity - rotational_speed;
 }
 
 void Compute_mPID(float desired_velocity, float velocity, float last_mI, float last_velocity_error, float ffK){
-
   float velocity_error = desired_velocity - velocity; 
   float feed_forward = desired_velocity * ffK; 
 
   float mP = velocity_error * mKp; 
   float mI = last_mI; 
-  if(abs(velocity_error) < mI_Treshold){
+  if(fabs(velocity_error) < mI_Treshold){
     mI += velocity_error * T; 
   } 
   mI = constrain(mI, -mI_Limit, mI_Limit); 
-  float mD = (velocity_error - last_velocity_error) * F; // ,,/T"
+  float mD = (velocity_error - last_velocity_error) * F; 
 
   mPID_return[0] = feed_forward + mP + mI * mKi + mD * mKd; 
   mPID_return[1] = mI; 
@@ -147,7 +176,6 @@ void Compute_mPID(float desired_velocity, float velocity, float last_mI, float l
 } 
 
 void Calculate_mPID(){
-
   Measure_Wheel_Velocity();
   Wheel_Velocity();
 
@@ -163,7 +191,6 @@ void Calculate_mPID(){
 } 
 
 void Drive_Motors(){
-
   if(left_motor_power < 0){ 
     left_motor_direction = LOW; 
     left_motor_power = abs(left_motor_power); 
@@ -173,11 +200,11 @@ void Drive_Motors(){
   }
 
   if(right_motor_power < 0){ 
-    right_motor_direction = LOW; 
+    right_motor_direction = HIGH; 
     right_motor_power = abs(right_motor_power); 
   } 
   else{ 
-    right_motor_direction = HIGH; 
+    right_motor_direction = LOW; 
   }
   
   left_motor_power = constrain(left_motor_power, 0, 255); 
@@ -190,7 +217,6 @@ void Drive_Motors(){
 } 
 
 void Motor_Setup(){
-
   pinMode(Left_Dir_Pin, OUTPUT);
   pinMode(Left_PWM_Pin, OUTPUT);
   pinMode(Right_Dir_Pin, OUTPUT);
@@ -198,89 +224,99 @@ void Motor_Setup(){
 }
 
 void IMU_Setup(){ 
-
   Wire.begin(I2C_SDA_Pin, I2C_SCL_Pin);
   Wire.setClock(400000);
+  delay(500);
 
-  Wire.beginTransmission(0x68); // MPU6050 Adress 
-  Wire.write(0x6B); // Waking up the sensor
+  // Wake up MPU6050
+  Wire.beginTransmission(0x68);
+  Wire.write(0x6B);
   Wire.write(0x00);
   Wire.endTransmission();
 
-  Wire.beginTransmission(0x68); // MPU6050 Adress 
-  Wire.write(0x1A); // Low-Pass Filter 
-  Wire.write(0x03); // Filter Bandwidth Frequency (44Hz) 
+  // Set Low-Pass Filter (10Hz)
+  Wire.beginTransmission(0x68); 
+  Wire.write(0x1A); 
+  Wire.write(0x05); 
   Wire.endTransmission();
 
-  Wire.beginTransmission(0x68); // MPU6050 Adress 
-  Wire.write(0x1B); // Sensitivity 
-  Wire.write(0x08); // Sensitivity value (+-500 Degree/s <--> 65.5 LSB/s) 
+  // Set Gyro Sensitivity (+-500 Deg/s)
+  Wire.beginTransmission(0x68); 
+  Wire.write(0x1B); 
+  Wire.write(0x08); 
   Wire.endTransmission();
 
-  Wire.beginTransmission(0x68); // MPU6050 Adress 
-  Wire.write(0x1C); // Accelerometer Range 
-  Wire.write(0x10); // Range Value (+-8G) 
+  // Set Accelerometer Range (+-8G)
+  Wire.beginTransmission(0x68); 
+  Wire.write(0x1C); 
+  Wire.write(0x10); 
   Wire.endTransmission(); 
 } 
 
 void IMU(){
+  // Čitanje žiroskopa
+  Wire.beginTransmission(0x68); 
+  Wire.write(0x43); 
+  Wire.endTransmission();
+  Wire.requestFrom(0x68, 6); 
 
-  Wire.beginTransmission(0x68); // MPU6050 Adress 
+  int16_t gyro_roll = Wire.read() << 8 | Wire.read(); 
+  int16_t gyro_pitch = Wire.read() << 8 | Wire.read(); 
+  int16_t gyro_yaw = Wire.read() << 8 | Wire.read(); 
+
+  pitch_rate = (float)gyro_yaw / 65.5; 
+
+  // Čitanje akcelerometra
+  Wire.beginTransmission(0x68); 
   Wire.write(0x3B); 
   Wire.endTransmission();
+  Wire.requestFrom(0x68, 6);
 
-  Wire.requestFrom(0x68, 14); // Reading sensor registers 
-
-  int16_t x_acceleration_lsb = Wire.read() << 8 | Wire.read(); 
-  int16_t y_acceleration_lsb = Wire.read() << 8 | Wire.read(); 
+  int16_t x_acceleration_lsb = Wire.read() << 8 | Wire.read();
+  int16_t y_acceleration_lsb = Wire.read() << 8 | Wire.read();
   int16_t z_acceleration_lsb = Wire.read() << 8 | Wire.read();
 
-  int16_t temperature = Wire.read() << 8 | Wire.read();
-
-  int16_t gyro_roll = Wire.read() << 8 | Wire.read();
-  int16_t gyro_pitch = Wire.read() << 8 | Wire.read();
-  int16_t gyro_yaw = Wire.read() << 8 | Wire.read(); // Combining registers for Pitch 
-
-  angle_rate = (float)gyro_pitch / 65.5 - Gyro_Drift; // Converting to Degree/s 
-
-  x_acceleration = (float)x_acceleration_lsb / 4096 - 0.035; 
+  x_acceleration = (float)x_acceleration_lsb / 4096 - 0.035;
   y_acceleration = (float)y_acceleration_lsb / 4096 + 0.000;
-  z_acceleration = (float)z_acceleration_lsb / 4096 + 0.035; 
+  z_acceleration = (float)z_acceleration_lsb / 4096 + 0.035;
 
-  acc_angle = -atan(x_acceleration / sqrt(z_acceleration * z_acceleration + y_acceleration * y_acceleration)) * 180 / PI; 
+  pitch_angle = atan2(y_acceleration, -x_acceleration) * 180.0 / PI;
 } 
 
 void Kalman(float kalman_state, float kalman_uncertainty, float kalman_input, float kalman_measurement){ 
-
   kalman_state = kalman_state + T * kalman_input; 
-  kalman_uncertainty = kalman_uncertainty + T * T * Gyro_Bias * Gyro_Bias;
+  kalman_uncertainty = kalman_uncertainty + T * T * 0.5 * 0.5;
   
-  float kalman_gain = kalman_uncertainty * 1 / (1 * kalman_uncertainty + Accelerometer_Std * Accelerometer_Std);
+  float kalman_gain = kalman_uncertainty * 1 / (1 * kalman_uncertainty + 0.5 * 0.5);
   kalman_state = kalman_state + kalman_gain * (kalman_measurement - kalman_state);
   kalman_uncertainty = (1 - kalman_gain) * kalman_uncertainty;
   
-  kalman_return[0] = kalman_state;
-  kalman_return[1] = kalman_uncertainty;
+  kalman_output[0] = kalman_state;
+  kalman_output[1] = kalman_uncertainty;
 } 
 
 void Kalman_Calculate(){
-
-  Kalman(angle, angle_uncertainty, angle_rate, acc_angle);
-  angle = kalman_return[0];
-  angle_uncertainty = kalman_return[1];
+  // Pozivamo Kalman sa čistim stanjima
+  Kalman(pitch_kalman_angle, pitch_kalman_angle_uncertainty, pitch_rate, pitch_angle);
+  
+  // Čisto filtrirano stanje vraćamo nazad bez dodavanja ofseta
+  pitch_kalman_angle = kalman_output[0]; 
+  pitch_kalman_angle_uncertainty = kalman_output[1];
+  
+  // Ofset od +4 dodajemo tek OVDE, na finalni ugao koji ide u PID i Plotter
+  angle = pitch_kalman_angle + 4.0;
 }
 
 void Compute_PID(float desired_angle, float angle, float last_I, float last_angle_error){
-
   float angle_error = desired_angle - angle; 
 
   float P = angle_error * Kp; 
   float I = last_I; 
-  if(abs(angle_error) < I_Treshold){
+  if(fabs(angle_error) < I_Treshold){
     I += angle_error * T; 
   } 
   I = constrain(I, -I_Limit, I_Limit); 
-  float D = (angle_error - last_angle_error) * F; // ,,T"
+  float D = (angle_error - last_angle_error) * F; 
 
   PID_return[0] = P + I * Ki + D * Kd; 
   PID_return[1] = I; 
@@ -288,7 +324,6 @@ void Compute_PID(float desired_angle, float angle, float last_I, float last_angl
 }
 
 void Calculate_PID(){
-
   Compute_PID(desired_angle, angle, last_I, last_angle_error);
   PID_desired_velocity = PID_return[0]; 
   last_I = PID_return[1]; 
@@ -296,37 +331,30 @@ void Calculate_PID(){
 }
 
 bool Fall_Detection(){
-
-  if(abs(angle) > Fall_Treshold){
-    
+  if(fabs(angle) > Fall_Treshold){
     last_I = 0;
     last_angle_error = 0;
-    
     left_last_mI = 0;
     left_last_velocity_error = 0;
-    
     right_last_mI = 0;
     right_last_velocity_error = 0;
 
     left_motor_power = 0;
     right_motor_power = 0;
     Drive_Motors();
-    
-    return 0;
+    return false;
   }
   else{
-    return 1;
+    return true;
   }
 }
 
 void Battery_Voltage(){
-
   uint16_t mv = analogReadMilliVolts(Battery_Pin);
   battery_voltage = (mv * 5.69) / 1000.0;
 }
 
 bool Battery_Protection(){
-
   battery_check_counter ++;
   if(battery_check_counter >= 600){
     Battery_Voltage();
@@ -340,32 +368,29 @@ bool Battery_Protection(){
     else{
       digitalWrite(Buzzer_Pin, LOW);
     }
-    return 1;
+    return true;
   }
   else{
     left_motor_power = 0;
     right_motor_power = 0;
     Drive_Motors();
-    return 0;
+    return false;
   }
 }
 
 void On_Connected_Controller(ControllerPtr game_pad){
-
   if(game_pad -> isGamepad()){
     controller = game_pad;
   }
 }
 
 void On_Disconnected_Controller(ControllerPtr game_pad){
-
   if(controller == game_pad){
     controller = nullptr;
   }
 }
 
 void Process_Gamepad(ControllerPtr game_pad){
-
   int r2_throttle = game_pad -> throttle();
   int brake = game_pad -> brake();
   int raw_steering = game_pad -> axisX();
@@ -379,12 +404,12 @@ void Process_Gamepad(ControllerPtr game_pad){
     steering = 0;
   }
 
-  desired_angle = throttle;
+  // FIKS: Kombinuje se baza iz terminala i otklon palice
+  desired_angle = base_angle + throttle;
   rotational_speed = (steering * Wheel_Base) / 2;
 }
 
 void Controller_Recieve(){
-
   BP32.update();
 
   if(controller && controller -> isConnected()){
@@ -392,15 +417,13 @@ void Controller_Recieve(){
   }
   else{
     throttle = 0;
-    desired_angle = 0;
+    desired_angle = base_angle; // FIKS: Ako nema džojstika, ciljani ugao je direktno ono iz terminala
     rotational_speed = 0; 
   }
 }
 
 void setup() { 
-
   Serial.begin(115200); 
-
   last_time = micros();
 
   pinMode(Buzzer_Pin, OUTPUT);
@@ -412,6 +435,7 @@ void setup() {
 } 
 
 void loop() { 
+  Proveri_Serial_Komande();
 
   if (micros() - last_time >= T * 1000000) {
     last_time += T * 1000000; 
@@ -420,12 +444,18 @@ void loop() {
     
     IMU();
     Kalman_Calculate();
-     
+       
     if(Fall_Detection() && Battery_Protection()){
-      
       Calculate_PID();  
       Calculate_mPID();
       Drive_Motors();
     }
+
+    // Čist ispis za Serial Plotter
+    Serial.print("Ciljani_Ugao:");   Serial.print(desired_angle); Serial.print(",  ");
+    Serial.print("Trenutni_Ugao:");  Serial.print(angle);         Serial.print(",  ");
+    Serial.print("Kp:");             Serial.print(Kp, 5);         Serial.print(",  ");
+    Serial.print("Ki:");             Serial.print(Ki, 5);         Serial.print(",  ");
+    Serial.print("Kd:");             Serial.println(Kd, 7);
   }
-} 
+}

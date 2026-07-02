@@ -93,7 +93,7 @@ void loop() {
 IMU();
 
 Kalman(pitch_kalman_angle, pitch_kalman_angle_uncertainty, pitch_rate, pitch_angle);
-pitch_kalman_angle = kalman_output[0];
+pitch_kalman_angle = kalman_output[0] + 4;
 pitch_kalman_angle_uncertainty = kalman_output[1];
 
 Serial.print("Pitch: ");
