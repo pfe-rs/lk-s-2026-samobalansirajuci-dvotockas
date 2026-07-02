@@ -8,11 +8,11 @@
 #define Battery_Pin 36
 #define Buzzer_Pin 12
 
-#define F 500 // System frequency 
-#define T 0.002 // System period 
+#define F 200 // System frequency 
+#define T 0.005 // System period 
 
 unsigned long last_time = 0; 
-float battery_voltage;
+float battery_voltage = 12;
 int battery_check_counter;
 
 ControllerPtr controller = nullptr;
@@ -46,7 +46,9 @@ ESP32Encoder right_encoder;
 #define Steps_Per_Revolution 8192 
 #define Wheel_Diameter 0.075 
 #define mI_Treshold 0.75
-#define mI_Limit 100
+#define mI_Limit 500
+#define Left_FFK 212.31
+#define Right_FFK 219.30
 
 const float Meters_Per_Step = PI * Wheel_Diameter / Steps_Per_Revolution; 
 
@@ -62,10 +64,11 @@ float PID_desired_velocity;
 float left_desired_velocity, left_velocity, left_last_mI, left_last_velocity_error, left_mPID_return; 
 float right_desired_velocity, right_velocity, right_last_mI, right_last_velocity_error, right_mPID_return; 
 
-float mKp = 0; 
-float mKi = 0; 
-float mKd = 0; 
+float mKp = 25.5; 
+float mKi = 20; 
+float mKd = 14; 
 float mPID_return[3]; 
+float mAlpha = 0.2;
 
 
 // Angle Control -- 
@@ -112,8 +115,11 @@ void Measure_Wheel_Velocity(){
   last_left_steps = left_steps; 
   last_right_steps = right_steps; 
 
-  left_velocity = delta_left * Meters_Per_Step * F; // ,,/T"
-  right_velocity = delta_right * Meters_Per_Step * F;
+  float raw_left_velocity = delta_left * Meters_Per_Step * F;
+  float raw_right_velocity = delta_right * Meters_Per_Steps * F;
+
+  left_velocity = (raw_left_velocity * mAlpha) + (left_velocity * (1 - mAlpha));
+  right_velocity = (raw_right_velocity * mAlpha) + (right_velocity * (1 - mAlpha));
 } 
 
 void Wheel_Velocity(){
@@ -122,9 +128,10 @@ void Wheel_Velocity(){
   right_desired_velocity = PID_desired_velocity - rotational_speed;
 }
 
-void Compute_mPID(float desired_velocity, float velocity, float last_mI, float last_velocity_error){
+void Compute_mPID(float desired_velocity, float velocity, float last_mI, float last_velocity_error, float ffK){
 
   float velocity_error = desired_velocity - velocity; 
+  float feed_forward = desired_velocity * ffK; 
 
   float mP = velocity_error * mKp; 
   float mI = last_mI; 
@@ -134,7 +141,7 @@ void Compute_mPID(float desired_velocity, float velocity, float last_mI, float l
   mI = constrain(mI, -mI_Limit, mI_Limit); 
   float mD = (velocity_error - last_velocity_error) * F; // ,,/T"
 
-  mPID_return[0] = mP + mI * mKi + mD * mKd; 
+  mPID_return[0] = feed_forward + mP + mI * mKi + mD * mKd; 
   mPID_return[1] = mI; 
   mPID_return[2] = velocity_error; 
 } 
@@ -144,12 +151,12 @@ void Calculate_mPID(){
   Measure_Wheel_Velocity();
   Wheel_Velocity();
 
-  Compute_mPID(left_desired_velocity, left_velocity, left_last_mI, left_last_velocity_error);
+  Compute_mPID(left_desired_velocity, left_velocity, left_last_mI, left_last_velocity_error, Left_FFK);
   left_motor_power = (int)mPID_return[0]; 
   left_last_mI = mPID_return[1]; 
   left_last_velocity_error = mPID_return[2];
 
-  Compute_mPID(right_desired_velocity, right_velocity, right_last_mI, right_last_velocity_error); 
+  Compute_mPID(right_desired_velocity, right_velocity, right_last_mI, right_last_velocity_error, Right_FFK); 
   right_motor_power = (int)mPID_return[0]; 
   right_last_mI = mPID_return[1]; 
   right_last_velocity_error = mPID_return[2]; 
@@ -321,7 +328,7 @@ void Battery_Voltage(){
 bool Battery_Protection(){
 
   battery_check_counter ++;
-  if(battery_check_counter >= 1000){
+  if(battery_check_counter >= 600){
     Battery_Voltage();
     battery_check_counter = 0;
   }
