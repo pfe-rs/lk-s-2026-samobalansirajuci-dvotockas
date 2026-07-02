@@ -4,9 +4,9 @@
 // ==========================================
 //          PARAMETRI ZA TJUNING (DINAMIČKI)  p25.5 i20 d14
 // ==========================================
-float mKp = 25.5;   
-float mKi = 20.0;   
-float mKd = 14.0;   
+float mKp = 70;   
+float mKi = 10.0;   
+float mKd = 10;   
 
 float TEST_DESIRED_VELOCITY = 0.0; 
 // ==========================================
@@ -167,17 +167,17 @@ void Calculate_mPID(){
 
 void Drive_Motors(){
   if(left_motor_power < 0){ 
-    left_motor_direction = LOW; 
+    left_motor_direction = HIGH; 
     left_motor_power = abs(left_motor_power); 
   } else { 
-    left_motor_direction = HIGH; 
+    left_motor_direction = LOW; 
   }
 
   if(right_motor_power < 0){ 
-    right_motor_direction = HIGH; 
+    right_motor_direction = LOW; 
     right_motor_power = abs(right_motor_power); 
   } else { 
-    right_motor_direction = LOW; 
+    right_motor_direction = HIGH; 
   }
   
   left_motor_power = constrain(left_motor_power, 0, 255); 
