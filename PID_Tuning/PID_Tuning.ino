@@ -89,26 +89,29 @@ float kalman_output[] = {0, 0};
 
 // Mapiranje na globalnu varijablu ugla koju koristi tvoj kaskadni PID
 float angle; 
-float base_angle = 2.5; // FIKS: Početna vrednost mehaničkog balansa koju menjaš preko terminala
+float base_angle = 3.6; // FIKS: Početna vrednost mehaničkog balansa koju menjaš preko terminala
 float desired_angle , last_I, last_angle_error; 
 #define I_Treshold 0.5
 #define I_Limit 10000
 
 // GLAVNI KOEFICIJENTI ZA BALANS - Tjunuješ ih uživo preko Serial Monitora
-float Kp = 0.025;
-float Ki = 1.3; // 0.75
-float Kd = 0.0;
+float Kp = 0.015;
+float Ki = 1.4; // 0.75
+float Kd = 0.00005;
 float PID_return[3]; 
 
 
-// Position Control --
+// Position Control (PID ZA POZICIJU I KOČENJE) --
 
 float robot_position;
-float K_vel = 0.01;
-float K_pos = 0.01;
+float pKp = 75;  // Tjunjuj preko 'x'
+float pKi = 0.5;  // Tjunjuj preko 'y'
+float pKd = 0.5;  // Tjunjuj preko 'z'
+float last_pI = 0;
+float last_position_error = 0;
 
 
-// Prijem komandi preko serijale uživo u toku rada (npr. v0.02 ili s0.05)
+// Prijem komandi preko serijale uživo u toku rada
 void Proveri_Serial_Komande() {
   if (Serial.available() > 0) {
     String input = Serial.readStringUntil('\n');
@@ -130,17 +133,22 @@ void Proveri_Serial_Komande() {
         Kd = vrednost;
         Serial.print(">>> Glavni Kd (Balans) postavljen na: "); Serial.println(Kd, 5);
       }
-      else if (komanda == 'c' || komanda == 'C') { // FIKS: Nova komanda za ciljani ugao (Centar mase)
+      else if (komanda == 'c' || komanda == 'C') { 
         base_angle = vrednost;
         Serial.print(">>> Bazni ciljani ugao postavljen na: "); Serial.println(base_angle, 2);
       }
-      else if (komanda == 'v' || komanda == 'V') { // OPCOJA: Podešavanje prigušenja brzine
-        K_vel = vrednost;
-        Serial.print(">>> K_vel postavljen na: "); Serial.println(K_vel, 5);
+      // PODEŠAVANJE POZICIONOG PID-a preko x, y, z
+      else if (komanda == 'x' || komanda == 'X') { 
+        pKp = vrednost;
+        Serial.print(">>> Pozicioni pKp postavljen na: "); Serial.println(pKp, 5);
       }
-      else if (komanda == 's' || komanda == 'S') { // OPCIJA: Podešavanje vraćanja na poziciju
-        K_pos = vrednost;
-        Serial.print(">>> K_pos postavljen na: "); Serial.println(K_pos, 5);
+      else if (komanda == 'y' || komanda == 'Y') { 
+        pKi = vrednost;
+        Serial.print(">>> Pozicioni pKi postavljen na: "); Serial.println(pKi, 5);
+      }
+      else if (komanda == 'z' || komanda == 'Z') { 
+        pKd = vrednost;
+        Serial.print(">>> Pozicioni pKd postavljen na: "); Serial.println(pKd, 5);
       }
     }
   }
@@ -364,6 +372,8 @@ bool Fall_Detection(){
     left_last_velocity_error = 0;
     right_last_mI = 0;
     right_last_velocity_error = 0;
+    last_pI = 0;
+    last_position_error = 0;
 
     left_motor_power = 0;
     right_motor_power = 0;
@@ -430,7 +440,6 @@ void Process_Gamepad(ControllerPtr game_pad){
     steering = 0;
   }
 
-  // FIKS: Kombinuje se baza iz terminala i otklon palice
   desired_angle = base_angle + throttle;
   rotational_speed = (steering * Wheel_Base) / 2;
 }
@@ -448,21 +457,36 @@ void Controller_Recieve(){
 }
 
 void Position_Control(){
-
-  float avarage_velocity = (left_velocity + right_velocity) * 0.5;
-  robot_position += avarage_velocity * T;
+  float average_velocity = (left_velocity + right_velocity) * 0.5;
+  robot_position += average_velocity * T;
 
   if(abs(throttle) > 0){
+    // Dok voziš, briši istoriju pozicije i slušaj kontroler
     robot_position = 0;
+    last_pI = 0;
+    last_position_error = 0;
     desired_angle = base_angle + throttle;
   }
   else{
-    desired_angle = base_angle - (avarage_velocity * K_vel) - (robot_position * K_pos);
+    // Kada pustiš palicu, drži trenutno mesto (ciljna pozicija je 0)
+    float position_error = 0 - robot_position;
+    
+    float pP = position_error * pKp;
+    
+    // Integracija sa periodom T i zaštitom od prepunjavanja (anti-windup)
+    last_pI += position_error * T;
+    last_pI = constrain(last_pI, -5.0, 5.0); // Limit uticaja integrala na nagib (u stepenima)
+    
+    float pD = (position_error - last_position_error) * F;
+    last_position_error = position_error;
+
+    // Izlaz iz PID-a dodajemo na base_angle
+    desired_angle = base_angle + pP + last_pI * pKi + pD * pKd;
   }
 }
 
 void setup() { 
-  // Brzina je podignuta na 921600 i postavljen timeout da se osigura stabilnih 200Hz
+  // Podignuto na 921600 da se spreči gušenje serijskog bafera na 200Hz
   Serial.begin(115200); 
   Serial.setTimeout(1); 
   
@@ -494,13 +518,14 @@ void loop() {
       Drive_Motors();
     }
 
-    // Čist ispis za Serial Plotter sa uključenim K_vel i K_pos vrednostima
+    // Čist ispis za Serial Plotter sa uključenim pozicionim parametrima
     Serial.print("Ciljani_Ugao:");   Serial.print(desired_angle); Serial.print(",  ");
     Serial.print("Trenutni_Ugao:");  Serial.print(angle);         Serial.print(",  ");
     Serial.print("Kp:");              Serial.print(Kp, 5);         Serial.print(",  ");
     Serial.print("Ki:");              Serial.print(Ki, 5);         Serial.print(",  ");
     Serial.print("Kd:");              Serial.print(Kd, 5);         Serial.print(",  ");
-    Serial.print("K_vel:");           Serial.print(K_vel, 5);      Serial.print(",  ");
-    Serial.print("K_pos:");           Serial.print(K_pos, 5);      Serial.println(",  ");
+    Serial.print("pKp:");             Serial.print(pKp, 5);        Serial.print(",  ");
+    Serial.print("pKi:");             Serial.print(pKi, 5);        Serial.print(",  ");
+    Serial.print("pKd:");             Serial.print(pKd, 5);        Serial.println(",  ");
   }
 }
