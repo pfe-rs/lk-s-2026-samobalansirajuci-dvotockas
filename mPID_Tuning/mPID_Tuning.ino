@@ -4,9 +4,9 @@
 // ==========================================
 //          PARAMETRI ZA TJUNING (DINAMIČKI)  p25.5 i20 d14
 // ==========================================
-float mKp = 70;   
-float mKi = 10.0;   
-float mKd = 10;   
+float mKp = 0.1;   
+float mKi = 0;   
+float mKd = 7.5;
 
 float TEST_DESIRED_VELOCITY = 0.0; 
 // ==========================================

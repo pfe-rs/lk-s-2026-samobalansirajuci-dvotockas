@@ -48,6 +48,8 @@ ESP32Encoder right_encoder;
 #define mI_Limit 500
 #define Left_FFK 219.30  
 #define Right_FFK 212.31 
+#define Left_FFN 10
+#define Right_FFN 12
 
 const float Meters_Per_Step = PI * Wheel_Diameter / Steps_Per_Revolution; 
 
@@ -64,11 +66,11 @@ float left_desired_velocity, left_velocity, left_last_mI, left_last_velocity_err
 float right_desired_velocity, right_velocity, right_last_mI, right_last_velocity_error; 
 
 // Donji PID (točkovi) - ostaje fiksiran jer Feedforward radi glavni posao
-float mKp = 0.5; 
-float mKi = 0.1; 
-float mKd = 0.01; 
+float mKp = 0.1; 
+float mKi = 0; 
+float mKd = 0.5; 
 float mPID_return[3]; 
-float mAlpha = 0.2;
+float mAlpha = 0.1;
 
 
 // Angle Control (GLAVNI URADI SAM INTEGRISANI IMU) -- 
@@ -88,14 +90,14 @@ float kalman_output[] = {0, 0};
 // Mapiranje na globalnu varijablu ugla koju koristi tvoj kaskadni PID
 float angle; 
 float base_angle = 3.0; // FIKS: Početna vrednost mehaničkog balansa koju menjaš preko terminala
-float desired_angle, last_I, last_angle_error; 
+float desired_angle  , last_I, last_angle_error; 
 #define I_Treshold 3
 #define I_Limit 10
 
 // GLAVNI KOEFICIJENTI ZA BALANS - Tjunuješ ih uživo preko Serial Monitora
-float Kp = 0.3;
-float Ki = 1.0;
-float Kd = 0.0002;
+float Kp = 0.1;
+float Ki = 0.3; // 0.75
+float Kd = 0.0001;
 float PID_return[3]; 
 
 
@@ -158,9 +160,17 @@ void Wheel_Velocity(){
   right_desired_velocity = PID_desired_velocity - rotational_speed;
 }
 
-void Compute_mPID(float desired_velocity, float velocity, float last_mI, float last_velocity_error, float ffK){
+void Compute_mPID(float desired_velocity, float velocity, float last_mI, float last_velocity_error, float ffK, int ffN){
+  
   float velocity_error = desired_velocity - velocity; 
-  float feed_forward = desired_velocity * ffK; 
+  float feed_forward; 
+
+  if(desired_velocity > 0.001){
+    feed_forward = desired_velocity * ffK + ffN;
+  }
+  else if(desired_velocity < -0.001){
+    feed_forward = desired_velocity * ffK - ffN;
+  }
 
   float mP = velocity_error * mKp; 
   float mI = last_mI; 
@@ -179,12 +189,12 @@ void Calculate_mPID(){
   Measure_Wheel_Velocity();
   Wheel_Velocity();
 
-  Compute_mPID(left_desired_velocity, left_velocity, left_last_mI, left_last_velocity_error, Left_FFK);
+  Compute_mPID(left_desired_velocity, left_velocity, left_last_mI, left_last_velocity_error, Left_FFK, Left_FFN);
   left_motor_power = (int)mPID_return[0]; 
   left_last_mI = mPID_return[1]; 
   left_last_velocity_error = mPID_return[2];
 
-  Compute_mPID(right_desired_velocity, right_velocity, right_last_mI, right_last_velocity_error, Right_FFK); 
+  Compute_mPID(right_desired_velocity, right_velocity, right_last_mI, right_last_velocity_error, Right_FFK, Right_FFN); 
   right_motor_power = (int)mPID_return[0]; 
   right_last_mI = mPID_return[1]; 
   right_last_velocity_error = mPID_return[2]; 
@@ -192,19 +202,19 @@ void Calculate_mPID(){
 
 void Drive_Motors(){
   if(left_motor_power < 0){ 
-    left_motor_direction = LOW; 
+    left_motor_direction = HIGH; 
     left_motor_power = abs(left_motor_power); 
   } 
   else{ 
-    left_motor_direction = HIGH; 
+    left_motor_direction = LOW; 
   }
 
   if(right_motor_power < 0){ 
-    right_motor_direction = HIGH; 
+    right_motor_direction = LOW; 
     right_motor_power = abs(right_motor_power); 
   } 
   else{ 
-    right_motor_direction = LOW; 
+    right_motor_direction = HIGH; 
   }
   
   left_motor_power = constrain(left_motor_power, 0, 255); 
@@ -285,9 +295,9 @@ void IMU(){
 
 void Kalman(float kalman_state, float kalman_uncertainty, float kalman_input, float kalman_measurement){ 
   kalman_state = kalman_state + T * kalman_input; 
-  kalman_uncertainty = kalman_uncertainty + T * T * 0.5 * 0.5;
+  kalman_uncertainty = kalman_uncertainty + T * T * 1 * 1;
   
-  float kalman_gain = kalman_uncertainty * 1 / (1 * kalman_uncertainty + 0.5 * 0.5);
+  float kalman_gain = kalman_uncertainty * 1 / (1 * kalman_uncertainty + 1 * 1);
   kalman_state = kalman_state + kalman_gain * (kalman_measurement - kalman_state);
   kalman_uncertainty = (1 - kalman_gain) * kalman_uncertainty;
   
@@ -308,9 +318,15 @@ void Kalman_Calculate(){
 }
 
 void Compute_PID(float desired_angle, float angle, float last_I, float last_angle_error){
-  float angle_error = desired_angle - angle; 
-
-  float P = angle_error * Kp; 
+  
+  float angle_error = (desired_angle - angle) / 180 * PI;
+  float P;
+  if(angle_error > 0){
+    P = (1 - cos(angle_error)) * Kp; 
+  }
+  else {
+    P = -((1 - cos(angle_error)) * Kp)
+  }
   float I = last_I; 
   if(fabs(angle_error) < I_Treshold){
     I += angle_error * T; 
@@ -454,8 +470,10 @@ void loop() {
     // Čist ispis za Serial Plotter
     Serial.print("Ciljani_Ugao:");   Serial.print(desired_angle); Serial.print(",  ");
     Serial.print("Trenutni_Ugao:");  Serial.print(angle);         Serial.print(",  ");
-    Serial.print("Kp:");             Serial.print(Kp, 5);         Serial.print(",  ");
-    Serial.print("Ki:");             Serial.print(Ki, 5);         Serial.print(",  ");
-    Serial.print("Kd:");             Serial.println(Kd, 7);
+    Serial.print("Kp:");             Serial.print(Kp, 9);         Serial.print(",  ");
+    Serial.print("Ki:");             Serial.print(Ki, 9);         Serial.print(",  ");
+    Serial.print("Kd:");             Serial.print(Kd, 9);         Serial.println(",  ");
+    //Serial.print("Left_PWM:");       Serial.print(left_motor_power);         Serial.print(",  ");
+    //Serial.print("Right_PWM:");             Serial.println(right_motor_power);
   }
 }

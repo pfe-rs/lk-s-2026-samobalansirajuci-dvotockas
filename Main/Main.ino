@@ -49,6 +49,8 @@ ESP32Encoder right_encoder;
 #define mI_Limit 500
 #define Left_FFK 212.31
 #define Right_FFK 219.30
+#define Left_FFN 7
+#define Right_FFN 12
 
 const float Meters_Per_Step = PI * Wheel_Diameter / Steps_Per_Revolution; 
 
@@ -64,9 +66,9 @@ float PID_desired_velocity;
 float left_desired_velocity, left_velocity, left_last_mI, left_last_velocity_error, left_mPID_return; 
 float right_desired_velocity, right_velocity, right_last_mI, right_last_velocity_error, right_mPID_return; 
 
-float mKp = 25.5; 
-float mKi = 20; 
-float mKd = 14; 
+float mKp = 70; 
+float mKi = 10; 
+float mKd = 10; 
 float mPID_return[3]; 
 float mAlpha = 0.2;
 
@@ -76,8 +78,8 @@ float mAlpha = 0.2;
 #define I2C_SDA_Pin 21
 #define I2C_SCL_Pin 22
 
-#define Gyro_Bias 0.03
-#define Accelerometer_Std 30.9
+#define Gyro_Bias 0.5 // 0.03
+#define Accelerometer_Std 0.3 // 30.9
 #define Gyro_Drift 0.3453865
 #define I_Treshold 3
 #define I_Limit 10
@@ -90,9 +92,9 @@ float x_acceleration, y_acceleration, z_acceleration;
 float angle_uncertainty = 4; // 2 * 2 
 float kalman_return[2]; 
 
-float Kp = 0;
-float Ki = 0;
-float Kd = 0;
+float Kp = 0.3;
+float Ki = 1;
+float Kd = 0.0002;
 float PID_return[3]; 
 
 
@@ -128,14 +130,14 @@ void Wheel_Velocity(){
   right_desired_velocity = PID_desired_velocity - rotational_speed;
 }
 
-void Compute_mPID(float desired_velocity, float velocity, float last_mI, float last_velocity_error, float ffK){
+void Compute_mPID(float desired_velocity, float velocity, float last_mI, float last_velocity_error, float ffK, int ffN){
 
   float velocity_error = desired_velocity - velocity; 
-  float feed_forward = desired_velocity * ffK; 
+  float feed_forward = desired_velocity * ffK + ffN; 
 
   float mP = velocity_error * mKp; 
   float mI = last_mI; 
-  if(abs(velocity_error) < mI_Treshold){
+  if(fabs(velocity_error) < mI_Treshold){
     mI += velocity_error * T; 
   } 
   mI = constrain(mI, -mI_Limit, mI_Limit); 
@@ -151,12 +153,12 @@ void Calculate_mPID(){
   Measure_Wheel_Velocity();
   Wheel_Velocity();
 
-  Compute_mPID(left_desired_velocity, left_velocity, left_last_mI, left_last_velocity_error, Left_FFK);
+  Compute_mPID(left_desired_velocity, left_velocity, left_last_mI, left_last_velocity_error, Left_FFK, Left_FFN);
   left_motor_power = (int)mPID_return[0]; 
   left_last_mI = mPID_return[1]; 
   left_last_velocity_error = mPID_return[2];
 
-  Compute_mPID(right_desired_velocity, right_velocity, right_last_mI, right_last_velocity_error, Right_FFK); 
+  Compute_mPID(right_desired_velocity, right_velocity, right_last_mI, right_last_velocity_error, Right_FFK, Right_FFN); 
   right_motor_power = (int)mPID_return[0]; 
   right_last_mI = mPID_return[1]; 
   right_last_velocity_error = mPID_return[2]; 
@@ -165,11 +167,11 @@ void Calculate_mPID(){
 void Drive_Motors(){
 
   if(left_motor_power < 0){ 
-    left_motor_direction = LOW; 
+    left_motor_direction = HIGH; 
     left_motor_power = abs(left_motor_power); 
   } 
   else{ 
-    left_motor_direction = HIGH; 
+    left_motor_direction = LOW; 
   }
 
   if(right_motor_power < 0){ 
@@ -241,13 +243,13 @@ void IMU(){
   int16_t gyro_pitch = Wire.read() << 8 | Wire.read();
   int16_t gyro_yaw = Wire.read() << 8 | Wire.read(); // Combining registers for Pitch 
 
-  angle_rate = (float)gyro_pitch / 65.5 - Gyro_Drift; // Converting to Degree/s 
+  angle_rate = (float)gyro_yaw / 65.5 - Gyro_Drift; // Converting to Degree/s 
 
   x_acceleration = (float)x_acceleration_lsb / 4096 - 0.035; 
   y_acceleration = (float)y_acceleration_lsb / 4096 + 0.000;
   z_acceleration = (float)z_acceleration_lsb / 4096 + 0.035; 
 
-  acc_angle = -atan(x_acceleration / sqrt(z_acceleration * z_acceleration + y_acceleration * y_acceleration)) * 180 / PI; 
+  acc_angle = atan2(y_acceleration, -x_acceleration) * 180 / PI; 
 } 
 
 void Kalman(float kalman_state, float kalman_uncertainty, float kalman_input, float kalman_measurement){ 
@@ -276,7 +278,7 @@ void Compute_PID(float desired_angle, float angle, float last_I, float last_angl
 
   float P = angle_error * Kp; 
   float I = last_I; 
-  if(abs(angle_error) < I_Treshold){
+  if(fabs(angle_error) < I_Treshold){
     I += angle_error * T; 
   } 
   I = constrain(I, -I_Limit, I_Limit); 
@@ -297,7 +299,7 @@ void Calculate_PID(){
 
 bool Fall_Detection(){
 
-  if(abs(angle) > Fall_Treshold){
+  if(fabs(angle) > Fall_Treshold){
     
     last_I = 0;
     last_angle_error = 0;
@@ -379,7 +381,7 @@ void Process_Gamepad(ControllerPtr game_pad){
     steering = 0;
   }
 
-  desired_angle = throttle;
+  desired_angle = 2.5;
   rotational_speed = (steering * Wheel_Base) / 2;
 }
 
@@ -392,7 +394,7 @@ void Controller_Recieve(){
   }
   else{
     throttle = 0;
-    desired_angle = 0;
+    desired_angle = 2.5;
     rotational_speed = 0; 
   }
 }
@@ -427,5 +429,7 @@ void loop() {
       Calculate_mPID();
       Drive_Motors();
     }
+    Serial.println(angle);
+    Serial.println(Fall_Detection());
   }
 } 
